@@ -1,0 +1,5 @@
+/build/
+/build-verify/
+/.netrescue-tools/
+/netrescue_test.topo
+/netrescue_invalid.topo
