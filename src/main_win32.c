@@ -24,6 +24,10 @@ static int g_selected_node = -1, g_selected_link = -1;
 static int g_drag_node = -1;
 static int g_link_source_id = -1;
 static HWND g_window;
+static HDC g_back_dc;
+static HBITMAP g_back_bitmap;
+static HGDIOBJ g_back_previous_bitmap;
+static int g_back_width, g_back_height;
 static HWND g_name_edit;
 static WNDPROC g_original_edit_proc;
 static const COLORREF BG = RGB(5, 14, 26), PANEL = RGB(10, 26, 42), CYAN = RGB(49, 179, 255), TEXT = RGB(218, 235, 250);
@@ -98,6 +102,49 @@ static void draw(HDC dc, RECT client) {
     if(g_has_comparison){(void)snprintf(buf,sizeof(buf),"GBN %llu tx / %.2fs / %.0f%%   SR %llu tx / %.2fs / %.0f%%",(unsigned long long)g_compare_gbn.statistics.data_transmissions,g_compare_gbn.duration_seconds,g_compare_gbn.efficiency*100.0,(unsigned long long)g_compare_sr.statistics.data_transmissions,g_compare_sr.duration_seconds,g_compare_sr.efficiency*100.0);label(dc,chart_x,h-26,buf,9,TEXT,false);}
     label(dc,w-234,h-88,g_arq.state==NR_ARQ_RUNNING?"o  RUNNING":g_arq.state==NR_ARQ_COMPLETE?"o  COMPLETE":g_arq.state==NR_ARQ_FAILED?"o  FAILED":"o  PAUSED / IDLE",11,g_arq.state==NR_ARQ_RUNNING?RGB(56,225,150):g_arq.state==NR_ARQ_FAILED?RGB(255,75,80):RGB(245,187,72),true);
 }
+static void release_back_buffer(void) {
+    if (g_back_dc != NULL) {
+        if (g_back_previous_bitmap != NULL) (void)SelectObject(g_back_dc, g_back_previous_bitmap);
+        (void)DeleteDC(g_back_dc);
+    }
+    if (g_back_bitmap != NULL) (void)DeleteObject(g_back_bitmap);
+    g_back_dc = NULL;
+    g_back_bitmap = NULL;
+    g_back_previous_bitmap = NULL;
+    g_back_width = 0;
+    g_back_height = 0;
+}
+static bool ensure_back_buffer(HWND hwnd, int width, int height) {
+    if (width <= 0 || height <= 0) return false;
+    if (g_back_dc != NULL && g_back_bitmap != NULL &&
+        g_back_width == width && g_back_height == height) return true;
+
+    HDC window_dc = GetDC(hwnd);
+    if (window_dc == NULL) return false;
+    HDC new_dc = CreateCompatibleDC(window_dc);
+    HBITMAP new_bitmap = new_dc != NULL ? CreateCompatibleBitmap(window_dc, width, height) : NULL;
+    (void)ReleaseDC(hwnd, window_dc);
+    if (new_dc == NULL || new_bitmap == NULL) {
+        if (new_bitmap != NULL) (void)DeleteObject(new_bitmap);
+        if (new_dc != NULL) (void)DeleteDC(new_dc);
+        return false;
+    }
+
+    HGDIOBJ previous = SelectObject(new_dc, new_bitmap);
+    if (previous == NULL || previous == HGDI_ERROR) {
+        (void)DeleteObject(new_bitmap);
+        (void)DeleteDC(new_dc);
+        return false;
+    }
+
+    release_back_buffer();
+    g_back_dc = new_dc;
+    g_back_bitmap = new_bitmap;
+    g_back_previous_bitmap = previous;
+    g_back_width = width;
+    g_back_height = height;
+    return true;
+}
 static void defaults(void){memset(&g_config,0,sizeof(g_config));g_config.protocol=NR_ARQ_GO_BACK_N;g_config.packet_count=20U;g_config.window_size=4U;g_config.payload_bytes=128U;g_config.packets_per_second=20.0;g_config.timeout_seconds=.18;g_config.seed=g_seed;g_config.congestion_control=true;}
 static LRESULT CALLBACK name_edit_proc(HWND edit,UINT msg,WPARAM wp,LPARAM lp){if(msg==WM_KEYDOWN&&(wp==VK_RETURN||wp==VK_ESCAPE)){PostMessageA(GetParent(edit),WM_APP+1,wp==VK_RETURN?1:0,0);return 0;}if(msg==WM_KILLFOCUS){PostMessageA(GetParent(edit),WM_APP+1,1,0);}return CallWindowProcA(g_original_edit_proc,edit,msg,wp,lp);}
 static void begin_node_rename(HWND hwnd){NrNode *node=nr_find_node(&g_network,g_selected_node);if(node==NULL||g_arq.state==NR_ARQ_RUNNING||g_arq.state==NR_ARQ_PAUSED)return;if(g_name_edit!=NULL)DestroyWindow(g_name_edit);RECT r;GetClientRect(hwnd,&r);g_name_edit=CreateWindowExA(0,"EDIT","",WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL,r.right-220,122,190,25,hwnd,NULL,GetModuleHandleA(NULL),NULL);if(g_name_edit){SetWindowTextA(g_name_edit,node->name);g_original_edit_proc=(WNDPROC)SetWindowLongPtrA(g_name_edit,GWLP_WNDPROC,(LONG_PTR)name_edit_proc);SetFocus(g_name_edit);SendMessageA(g_name_edit,EM_SETSEL,0,-1);}}
@@ -113,10 +160,13 @@ static void select_topology(NrTopologyType type){if(g_arq.state==NR_ARQ_RUNNING|
 static void toggle_selected_link(void){if(g_selected_link<0&&g_network.link_count>0U)g_selected_link=g_network.links[0].id;NrLink *l=nr_find_link(&g_network,g_selected_link);if(l)(void)nr_set_link_active(&g_network,l->id,!l->active);}
 static LRESULT CALLBACK wndproc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
     switch(msg){case WM_CREATE:SetTimer(hwnd,1,30,NULL);return 0;
+    case WM_SIZE:{RECT r;if(GetClientRect(hwnd,&r)&&r.right>0&&r.bottom>0)(void)ensure_back_buffer(hwnd,r.right,r.bottom);InvalidateRect(hwnd,NULL,FALSE);return 0;}
+    case WM_DISPLAYCHANGE:{release_back_buffer();RECT r;if(GetClientRect(hwnd,&r)&&r.right>0&&r.bottom>0)(void)ensure_back_buffer(hwnd,r.right,r.bottom);InvalidateRect(hwnd,NULL,FALSE);return 0;}
     case WM_GETMINMAXINFO:{MINMAXINFO *limits=(MINMAXINFO *)lp;limits->ptMinTrackSize.x=1240;limits->ptMinTrackSize.y=760;return 0;}
-    case WM_TIMER:if(g_running){nr_step(&g_network,.03);nr_arq_step(&g_arq,.03);if(g_arq.state!=NR_ARQ_RUNNING)g_running=false;}InvalidateRect(hwnd,NULL,FALSE);return 0;
+    case WM_TIMER:if(wp==1&&g_running){nr_step(&g_network,.03);nr_arq_step(&g_arq,.03);if(g_arq.state!=NR_ARQ_RUNNING)g_running=false;InvalidateRect(hwnd,NULL,FALSE);}return 0;
     case WM_APP+1:finish_node_rename(hwnd,wp!=0);InvalidateRect(hwnd,NULL,FALSE);return 0;
-    case WM_PAINT:{PAINTSTRUCT ps;HDC dc=BeginPaint(hwnd,&ps);RECT r;GetClientRect(hwnd,&r);draw(dc,r);EndPaint(hwnd,&ps);return 0;}
+    case WM_ERASEBKGND:return 1;
+    case WM_PAINT:{PAINTSTRUCT ps;HDC dc=BeginPaint(hwnd,&ps);RECT r;if(GetClientRect(hwnd,&r)&&r.right>0&&r.bottom>0){if(ensure_back_buffer(hwnd,r.right,r.bottom)){draw(g_back_dc,r);if(!BitBlt(dc,0,0,r.right,r.bottom,g_back_dc,0,0,SRCCOPY))draw(dc,r);}else draw(dc,r);}EndPaint(hwnd,&ps);return 0;}
     case WM_KEYDOWN:if((wp=='S'||wp=='O')&&(GetKeyState(VK_CONTROL)&0x8000))topology_file(hwnd,wp=='S');else if(wp==VK_F2)begin_node_rename(hwnd);else if(wp==VK_SPACE)start_pause();else if(wp=='S')send_packet();else if(wp=='V')compare_protocols();else if(wp=='F')toggle_selected_link();else if(wp=='T'&&g_selected_node>0&&g_arq.state!=NR_ARQ_RUNNING&&g_arq.state!=NR_ARQ_PAUSED){NrNode *node=nr_find_node(&g_network,g_selected_node);if(node){node->type=(NrNodeType)((node->type+1)%5);g_topology=(NrTopologyType)-1;}}else if(wp=='N'&&g_selected_node>0){NrNode *node=nr_find_node(&g_network,g_selected_node);if(node)(void)nr_set_node_active(&g_network,node->id,!node->active);}else if(wp=='K'&&g_selected_link>0&&g_arq.state!=NR_ARQ_RUNNING&&g_arq.state!=NR_ARQ_PAUSED){NrLink *link=nr_find_link(&g_network,g_selected_link);if(link){link->bidirectional=!link->bidirectional;g_topology=(NrTopologyType)-1;}}else if(wp=='M')g_config.congestion_control=!g_config.congestion_control;else if(wp=='R')reset_simulation();else if(wp=='1'&&g_selected_node>0)g_source_id=g_selected_node;else if(wp=='2'&&g_selected_node>0)g_destination_id=g_selected_node;else if(wp=='P')g_config.protocol=(NrArqProtocol)((g_config.protocol+1)%NR_ARQ_PROTOCOL_COUNT);else if(wp=='C')g_config.corruption_probability=g_config.corruption_probability>=.99?0.0:fmin(1.0,g_config.corruption_probability+.1);else if(wp=='X')g_config.loss_probability=g_config.loss_probability>=.99?0.0:fmin(1.0,g_config.loss_probability+.1);else if(wp==VK_OEM_4&&g_arq.state!=NR_ARQ_RUNNING&&g_arq.state!=NR_ARQ_PAUSED)g_config.payload_bytes=g_config.payload_bytes>64U?g_config.payload_bytes-64U:1U;else if(wp==VK_OEM_6&&g_arq.state!=NR_ARQ_RUNNING&&g_arq.state!=NR_ARQ_PAUSED)g_config.payload_bytes=g_config.payload_bytes<65471U?g_config.payload_bytes+64U:65535U;else if(wp==VK_ADD||wp==VK_OEM_PLUS)g_config.packets_per_second=fmin(10000.0,g_config.packets_per_second+5.0);else if(wp==VK_SUBTRACT||wp==VK_OEM_MINUS)g_config.packets_per_second=fmax(0.0,g_config.packets_per_second-5.0);else if(wp=='G'){g_seed=(unsigned)GetTickCount();g_config.seed=g_seed;}else if(wp=='L'&&g_selected_node>0&&g_arq.state!=NR_ARQ_RUNNING&&g_arq.state!=NR_ARQ_PAUSED){if(g_link_source_id<0){g_link_source_id=g_selected_node;g_link_mode=true;}else if(g_link_source_id!=g_selected_node&&nr_add_link(&g_network,g_link_source_id,g_selected_node,true,1.0,10.0,100.0)>0){g_link_source_id=-1;g_link_mode=false;g_topology=(NrTopologyType)-1;}}else if(wp==VK_DELETE&&g_arq.state!=NR_ARQ_RUNNING&&g_arq.state!=NR_ARQ_PAUSED){if(g_selected_link>0){(void)nr_remove_link(&g_network,g_selected_link);g_selected_link=-1;g_topology=(NrTopologyType)-1;}else if(g_selected_node>0){(void)nr_remove_node(&g_network,g_selected_node);g_selected_node=-1;g_topology=(NrTopologyType)-1;}}else if(wp==VK_F5)reset_demo();else if(wp==VK_ESCAPE){g_selected_node=-1;g_selected_link=-1;g_link_source_id=-1;g_link_mode=false;}InvalidateRect(hwnd,NULL,FALSE);return 0;
     case WM_LBUTTONDOWN:{int x=GET_X_LPARAM(lp),y=GET_Y_LPARAM(lp);RECT r;GetClientRect(hwnd,&r);int w=r.right,canvasw=w-490,canvash=r.bottom-94;
       if(y<60&&x>w-500&&x<w-388)start_pause();else if(y<60&&x>w-380&&x<w-262)toggle_traffic();else if(y<60&&x>w-252&&x<w-140)toggle_selected_link();else if(y<60&&x>w-132)reset_simulation();
@@ -138,7 +188,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
       InvalidateRect(hwnd,NULL,FALSE);return 0;}
     case WM_MOUSEMOVE:if(g_dragging){RECT r;GetClientRect(hwnd,&r);NrNode *n=nr_find_node(&g_network,g_drag_node);if(n){int cw=r.right-490,ch=r.bottom-94;n->x=(float)((GET_X_LPARAM(lp)-244-70)/(double)(cw-140));n->y=(float)((GET_Y_LPARAM(lp)-78-65)/(double)(ch-245));if(n->x<0)n->x=0;if(n->x>1)n->x=1;if(n->y<0)n->y=0;if(n->y>1)n->y=1;g_topology=(NrTopologyType)-1;}InvalidateRect(hwnd,NULL,FALSE);}return 0;
     case WM_LBUTTONUP:g_dragging=false;g_drag_node=-1;ReleaseCapture();return 0;
-    case WM_DESTROY:KillTimer(hwnd,1);PostQuitMessage(0);return 0;}
+    case WM_DESTROY:KillTimer(hwnd,1);release_back_buffer();PostQuitMessage(0);return 0;}
     return DefWindowProc(hwnd,msg,wp,lp);
 }
-int WINAPI WinMain(HINSTANCE instance,HINSTANCE previous,LPSTR cmd,int show){(void)previous;(void)cmd;reset_demo();WNDCLASSA wc;memset(&wc,0,sizeof(wc));wc.lpfnWndProc=wndproc;wc.hInstance=instance;wc.lpszClassName="NetRescueDashboard";wc.hCursor=LoadCursor(NULL,IDC_ARROW);wc.hbrBackground=CreateSolidBrush(BG);RegisterClassA(&wc);g_window=CreateWindowExA(0,wc.lpszClassName,"NetRescue | Fault-Tolerant Network Simulation",WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,1500,950,NULL,NULL,instance,NULL);if(!g_window)return 1;ShowWindow(g_window,show);MSG message;while(GetMessage(&message,NULL,0,0)>0){TranslateMessage(&message);DispatchMessage(&message);}return 0;}
+int WINAPI WinMain(HINSTANCE instance,HINSTANCE previous,LPSTR cmd,int show){(void)previous;(void)cmd;reset_demo();WNDCLASSA wc;memset(&wc,0,sizeof(wc));wc.lpfnWndProc=wndproc;wc.hInstance=instance;wc.lpszClassName="NetRescueDashboard";wc.hCursor=LoadCursor(NULL,IDC_ARROW);wc.hbrBackground=NULL;RegisterClassA(&wc);g_window=CreateWindowExA(0,wc.lpszClassName,"NetRescue | Fault-Tolerant Network Simulation",WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1500,950,NULL,NULL,instance,NULL);if(!g_window)return 1;ShowWindow(g_window,show);MSG message;while(GetMessage(&message,NULL,0,0)>0){TranslateMessage(&message);DispatchMessage(&message);}return 0;}

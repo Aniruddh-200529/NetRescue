@@ -1,6 +1,7 @@
 #include "arq.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define NR_ARQ_MAX_ATTEMPTS 16U
@@ -373,14 +374,19 @@ bool nr_arq_compare(const NrNetwork *network, const NrArqConfig *config, int sou
     for (size_t run = 0; run < 2U; ++run) {
         NrArqConfig trial = *config;
         trial.protocol = protocols[run];
-        NrArqSimulation simulation;
-        if (!nr_arq_start(&simulation, network, &trial, source, destination)) return false;
-        for (unsigned step = 0U; step < 300000U && simulation.state == NR_ARQ_RUNNING; ++step)
-            nr_arq_step(&simulation, 0.01);
-        results[run]->completed = simulation.state == NR_ARQ_COMPLETE;
-        results[run]->duration_seconds = simulation.time_seconds;
-        results[run]->efficiency = nr_arq_efficiency(&simulation);
-        results[run]->statistics = simulation.stats;
+        NrArqSimulation *simulation = malloc(sizeof(*simulation));
+        if (simulation == NULL) return false;
+        if (!nr_arq_start(simulation, network, &trial, source, destination)) {
+            free(simulation);
+            return false;
+        }
+        for (unsigned step = 0U; step < 300000U && simulation->state == NR_ARQ_RUNNING; ++step)
+            nr_arq_step(simulation, 0.01);
+        results[run]->completed = simulation->state == NR_ARQ_COMPLETE;
+        results[run]->duration_seconds = simulation->time_seconds;
+        results[run]->efficiency = nr_arq_efficiency(simulation);
+        results[run]->statistics = simulation->stats;
+        free(simulation);
     }
     return true;
 }
