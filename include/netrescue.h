@@ -33,6 +33,7 @@ typedef struct {
     int id, from, to;
     bool bidirectional, active;
     double cost, delay_ms, bandwidth_mbps, loss_probability;
+    double jitter_ms; /* maximum extra per-traversal delay, drawn uniformly in [0, jitter_ms] */
     unsigned packets_transmitted, packets_lost;
     double utilization;
 } NrLink;
@@ -83,6 +84,9 @@ bool nr_set_link_active(NrNetwork *network, int link_id, bool active);
 NrNode *nr_find_node(NrNetwork *network, int node_id);
 NrLink *nr_find_link(NrNetwork *network, int link_id);
 NrRoute nr_find_route(const NrNetwork *network, int source, int destination);
+/* Dijkstra that additionally treats links whose index is set in blocked_links as unusable (may be NULL). */
+NrRoute nr_find_route_masked(const NrNetwork *network, int source, int destination, const bool *blocked_links);
+int nr_find_link_between(const NrNetwork *network, int from, int to, const bool *blocked_links);
 bool nr_is_connected(const NrNetwork *network, int source, int destination);
 unsigned nr_checksum(const void *data, size_t length);
 int nr_send_packet(NrNetwork *network, int source, int destination, unsigned payload_size);
@@ -91,6 +95,17 @@ void nr_log(NrNetwork *network, const char *message);
 bool nr_load_demo(NrNetwork *network);
 bool nr_save_topology(const NrNetwork *network, const char *path);
 bool nr_load_topology(NrNetwork *network, const char *path);
+/* In-memory variants used by the browser API. The returned text is malloc'ed; free it with free(). */
+char *nr_topology_to_text(const NrNetwork *network);
+bool nr_topology_from_text(NrNetwork *network, const char *text);
+
+#define NR_MAX_ISSUES 32
+typedef enum { NR_ISSUE_INFO, NR_ISSUE_WARNING, NR_ISSUE_ERROR } NrIssueSeverity;
+typedef struct { NrIssueSeverity severity; int node_id, link_id; char message[NR_EVENT_LEN]; } NrIssue;
+/* Checks the graph and the chosen endpoints. Returns the number of issues written (<= NR_MAX_ISSUES). */
+size_t nr_validate_network(const NrNetwork *network, int source, int destination, NrIssue issues[NR_MAX_ISSUES]);
+/* Picks the first and last host (or first and last node) as default transfer endpoints. */
+bool nr_default_endpoints(const NrNetwork *network, int *source, int *destination);
 double nr_reliability(const NrNetwork *network);
 const char *nr_node_type_name(NrNodeType type);
 const char *nr_packet_state_name(NrPacketState state);

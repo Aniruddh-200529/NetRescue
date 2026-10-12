@@ -17,7 +17,7 @@ static void release_packet_queue(NrNetwork *n, NrPacket *p) {
 
 void nr_log(NrNetwork *n, const char *message) {
     if (n == NULL || message == NULL) return;
-    (void)snprintf(n->events[n->event_cursor], NR_EVENT_LEN, "[%06.2fs] %s", n->time_seconds, message);
+    (void)snprintf(n->events[n->event_cursor], NR_EVENT_LEN, "[%06.2fs] %.100s", n->time_seconds, message);
     n->event_cursor = (n->event_cursor + 1U) % 64U;
     if (n->event_count < 64U) ++n->event_count;
 }
@@ -103,7 +103,19 @@ static double edge_cost(const NrNetwork *n, const NrLink *l) {
     return l->cost;
 }
 
-NrRoute nr_find_route(const NrNetwork *n, int source, int destination) {
+NrRoute nr_find_route(const NrNetwork *n, int source, int destination) { return nr_find_route_masked(n, source, destination, NULL); }
+
+int nr_find_link_between(const NrNetwork *n, int from, int to, const bool *blocked) {
+    if (n == NULL) return -1;
+    for (size_t j = 0; j < n->link_count; ++j) {
+        const NrLink *l = &n->links[j];
+        if (!l->active || (blocked != NULL && blocked[j])) continue;
+        if ((l->from == from && l->to == to) || (l->bidirectional && l->from == to && l->to == from)) return (int)j;
+    }
+    return -1;
+}
+
+NrRoute nr_find_route_masked(const NrNetwork *n, int source, int destination, const bool *blocked) {
     NrRoute route; memset(&route, 0, sizeof(route));
     if (n == NULL || nr_find_node((NrNetwork *)n, source) == NULL || nr_find_node((NrNetwork *)n, destination) == NULL) return route;
     if (!nr_find_node((NrNetwork *)n, source)->active || !nr_find_node((NrNetwork *)n, destination)->active) return route;
@@ -120,7 +132,7 @@ NrRoute nr_find_route(const NrNetwork *n, int source, int destination) {
         if (u == dst) break;
         used[u] = true;
         for (size_t j = 0; j < n->link_count; ++j) {
-            const NrLink *l = &n->links[j]; if (!l->active) continue;
+            const NrLink *l = &n->links[j]; if (!l->active || (blocked != NULL && blocked[j])) continue;
             int next_id = -1;
             if (l->from == n->nodes[u].id) next_id = l->to;
             else if (l->bidirectional && l->to == n->nodes[u].id) next_id = l->from;

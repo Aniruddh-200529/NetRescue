@@ -1,15 +1,15 @@
 @echo off
-setlocal EnableDelayedExpansion
-if exist ".netrescue-tools\cmake\data\bin\cmake.exe" (
-  set "CMAKE_EXE=%CD%\.netrescue-tools\cmake\data\bin\cmake.exe"
-  set "CTEST_EXE=%CD%\.netrescue-tools\cmake\data\bin\ctest.exe"
-  "!CMAKE_EXE!" -S . -B build -G Ninja -DCMAKE_MAKE_PROGRAM="!CD!\.netrescue-tools\bin\ninja.exe" -DCMAKE_C_COMPILER="!CD!\.netrescue-tools\ziglang\zig.exe" -DCMAKE_C_COMPILER_ARG1=cc -DCMAKE_BUILD_TYPE=Release
+rem Builds the native C engine, CLI tools and tests, then runs the C test suite.
+rem Uses MSVC if available (Developer prompt), otherwise MinGW-w64 gcc + mingw32-make.
+setlocal
+where cl >nul 2>nul
+if %errorlevel%==0 (
+  cmake -S . -B build
 ) else (
-  set "CMAKE_EXE=cmake"
-  set "CTEST_EXE=ctest"
-  "!CMAKE_EXE!" -S . -B build
+  where gcc >nul 2>nul || (echo No C compiler found. Install Visual Studio Build Tools or MinGW-w64. & exit /b 1)
+  cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
 )
 if errorlevel 1 exit /b %errorlevel%
-"%CMAKE_EXE%" --build build --config Release --parallel
+cmake --build build --config Release --parallel
 if errorlevel 1 exit /b %errorlevel%
-"%CTEST_EXE%" --test-dir build --output-on-failure
+ctest --test-dir build -C Release --output-on-failure

@@ -3,3 +3,6 @@
 /.netrescue-tools/
 /netrescue_test.topo
 /netrescue_invalid.topo
+/web/node_modules/
+/web/dist/
+/web/e2e-output/

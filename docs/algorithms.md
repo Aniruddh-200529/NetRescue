@@ -2,30 +2,73 @@
 
 ## Routing
 
-Dijkstra maintains tentative distances and predecessors, repeatedly selects the unvisited minimum, then relaxes each traversable graph edge. The selected cost is link cost, delay, or `cost + delay * weight_delay + utilization * weight_congestion`. Inactive endpoints and inactive edges are excluded. The result contains reachability, ordered node IDs, and aggregate cost.
+Dijkstra maintains tentative distances and predecessors, repeatedly selects the unvisited minimum and relaxes
+each traversable edge. Edge weight is the link cost, the delay, or `cost + delay·0.1 + utilisation·2`
+(composite). Inactive nodes and links, and links blocked by a scheduled outage (`nr_find_route_masked`),
+are excluded; directed links are respected. In the ARQ engine every node forwards a frame to the next hop
+of the shortest path toward the frame's destination, so a failure mid-transfer reroutes traffic at the node
+where the frame currently is.
 
-## Packet progression and recovery
+## Stop-and-Wait
 
-Each packet stores a path, current hop, TTL, and fractional hop progress. `nr_step` advances fractional progress according to edge delay and simulation delta time. On an unavailable edge, it computes a new shortest path from the packet's current node. Link loss is drawn from a seeded LCG and compared to the link's configured probability.
+Window of one. The sender transmits packet *n*, starts its timer and waits. The receiver accepts only the
+next expected packet, delivers it, and returns a cumulative ACK carrying the next expected number. A
+duplicate (the ACK was lost or the timer was premature) is discarded and re-acknowledged. On a timeout or a
+NAK the same packet is resent.
 
-## Reliable transfer
+## Go-Back-N
 
-`arq.c` owns a timer-driven event simulation independent of the UI. Data and ACK/NACK events have route delay, sequence/ack numbers, attempt count, checksum result, loss/corruption state, and start/due times. Stop-and-Wait limits the sender to one outstanding frame. Go-Back-N uses a cumulative receiver base and retransmits the outstanding window when the base times out or a NACK arrives. Selective Repeat ACKs and buffers in-window out-of-order frames independently and retries only unacknowledged timed-out frames. All protocols bound the retry count and event/frame capacities. Corruption changes checksum input; a mismatch leads to a NACK or discarded ACK, then retransmission/timeout behavior.
+Sender window *W*, one timer for the oldest unacknowledged packet. The receiver accepts only the next
+expected packet; anything later is discarded and answered with a duplicate cumulative ACK. A cumulative ACK
+*k* acknowledges everything below *k*; it restarts the timer if packets remain outstanding. **On timeout the
+sender resends every outstanding packet from the base** (the first is counted as a timeout retransmission,
+the rest as go-back retransmissions). On a NAK for packet *k* it resends from *k*. The receiver sends at most
+one NAK per expected packet. A lost ACK is usually harmless because the next cumulative ACK covers it.
 
-Traffic generation advances from simulation time at the configured packets-per-second rate, bounded by the sender window. Error draws are deterministically keyed by seed, sequence, attempt, and error type, so ACK-count differences do not shift later data-frame loss/corruption patterns. `nr_arq_compare` runs GBN and Selective Repeat with the same configuration and seed, returning actual duration, transmissions, delivery, retries, and efficiency. Chart history samples are calculated from delivered packets, payload bytes, elapsed time, and accumulated delivery latency.
+## Selective Repeat
 
-## Queueing and congestion control
+Sender window *W* with **one timer per packet**; each ACK acknowledges exactly one packet. The receiver
+accepts any correct packet inside `[base, base + W)`, buffers out-of-order packets, re-acknowledges
+duplicates, and delivers to the application in order when gaps fill. Only packets whose own timer expired,
+or that were NAKed, are resent.
 
-The active forward route's smallest router/switch queue capacity bounds simultaneous data events. Attempts arriving while it is full are marked dropped and proceed through the selected ARQ protocol's normal timeout/retry path. The optional controller applies multiplicative decrease on overflow or utilization at/above 80%; while utilization stays at/below 25%, it additively increases the configured packet rate each second until it reaches the original rate. The model is educational and does not implement TCP.
+## Timers and limits
+
+The timer starts when a frame is handed to the sender's transmit queue. Each packet may be retransmitted
+`max_retries` times; one more need aborts the whole transfer (`retry_limit`). `max_sim_time` (default 600 s)
+stops runaway runs (`time_limit`). Both are reported as incomplete runs.
+
+## Pacing, windows and congestion control
+
+New packets are released at most every `1 / packets_per_second` seconds and only while the window has room.
+Rate AIMD (the original `congestion.c` controller): on a queue-overflow signal from the path, or route queue
+utilisation ≥ 80 %, the offered rate is halved (at most once per timeout interval); while utilisation stays
+≤ 25 % it rises by 10 % of the maximum each second. Window AIMD: the congestion window starts at 1, grows by
+1 per ACK below `ssthresh` and by 1/cwnd above it, and halves on a timeout (at most once per timeout interval).
+The effective window is `min(W, floor(cwnd))`.
+
+## Faults and checksums
+
+See [fault-injection.md](fault-injection.md).
+
+## Experiments
+
+For every sweep value × selected protocol × trial the runner copies the network, applies overrides and the
+sweep value, builds a fresh simulation with seed `seed_base + trial × seed_stride` and runs it to the end.
+Statistics use the sample standard deviation and Student-t 95 % intervals. The findings are sentences built
+from the aggregates: rankings at the first and last sweep points (ties when equal at display precision;
+CI overlap noted), Go-Back-N vs Selective Repeat retransmission split, unnecessary retransmissions compared
+with the timeout and no-load RTT, the Stop-and-Wait one-packet-per-RTT ceiling, observed faults, sweep
+trends, and queue/congestion behaviour. No conclusion is hard-coded.
 
 ## Topology templates
 
-`topology.c` creates graph nodes and links through the same network model used by routing. The templates generate a path-like line/bus graph, star, ring, binary tree, full mesh, hybrid chords, or seeded random redundant edges. The random template first creates a spanning line to keep all generated nodes reachable.
-
-## Checksum and reliability
-
-`nr_checksum` uses 32-bit FNV-1a over the provided byte range. The reliability value is a project-defined score: delivered/generated percentage less 25 points per lost or dropped packet as a fraction of generated traffic, bounded to 0–100.
+Line/bus: chain. Star: centre switch, hosts around it. Ring: cycle with hosts opposite each other. Tree: binary
+tree, router root, switches inside, hosts at the leaves. Full mesh: every pair (at most 23 nodes, within the
+256-link limit). Hybrid: chain plus chords every second node plus an end-to-end link. Random: spanning chain
+plus seeded extra edges (28 %), so it is always connected.
 
 ## CIDR
 
-IPv4 values are represented as 32-bit network-order integers. Prefix masks are formed without shifting by 32. `/31` exposes both addresses as point-to-point endpoints; `/32` represents one host route.
+IPv4 values are 32-bit integers; prefix masks are formed without shifting by 32. `/31` exposes both
+addresses as point-to-point endpoints; `/32` is one host route.

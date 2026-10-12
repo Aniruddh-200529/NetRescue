@@ -110,7 +110,8 @@ static void test_cidr_prefix_boundaries(void) {
 }
 static NrArqConfig arq_config(NrArqProtocol protocol, size_t packets, unsigned window) {
     NrArqConfig c; memset(&c, 0, sizeof(c)); c.protocol = protocol; c.packet_count = packets; c.window_size = window;
-    c.payload_bytes = 128U; c.packets_per_second = 100.0; c.timeout_seconds = 0.12; c.seed = 42U; return c;
+    c.payload_bytes = 128U; c.packets_per_second = 100.0; c.timeout_seconds = 0.12; c.seed = 42U;
+    c.max_retries = 15U; c.use_nak = true; return c;
 }
 static void run_arq(NrArqSimulation *s) {
     for (unsigned i = 0; i < 20000U && s->state == NR_ARQ_RUNNING; ++i) nr_arq_step(s, 0.01);
@@ -198,13 +199,19 @@ static void test_congestion_control_and_queue_recovery(void) {
     assert(nr_congestion_observe(&controller,.01,1.0,true)==32.0&&controller.decreases==1U);
     (void)nr_congestion_observe(&controller,10.0,0.0,false);
     assert(fabs(controller.rate-64.0)<1e-9&&controller.increases>=5U);
+    /* The engine now models real per-port FIFO queues with serialisation at link bandwidth, so overflow
+     * needs a bottleneck: R1->R2 (link 2) is slowed to 0.1 Mbps (about 11.8 ms per 148-byte frame) while
+     * the sender offers 1000 frames/s into a one-frame router queue. */
     NrNetwork n;NrArqSimulation s;assert(nr_load_demo(&n));
     for(size_t i=0;i<n.node_count;i++)if(n.nodes[i].type==NR_ROUTER)n.nodes[i].queue_capacity=1U;
+    nr_find_link(&n,2)->bandwidth_mbps=0.1;
     NrArqConfig c=arq_config(NR_ARQ_GO_BACK_N,5U,4U);c.packets_per_second=1000.0;c.congestion_control=true;
-    assert(nr_arq_start(&s,&n,&c,n.nodes[0].id,n.nodes[5].id));nr_arq_step(&s,.01);
-    assert(s.stats.queue_drops>0U&&s.congestion.decreases>0U&&s.queue_utilization==1.0);
+    assert(nr_arq_start(&s,&n,&c,n.nodes[0].id,n.nodes[5].id));nr_arq_step(&s,.03);
+    NrArqMetrics m;nr_arq_compute_metrics(&s,&m);
+    assert(s.stats.queue_drops>0U&&s.congestion.decreases>0U&&m.queue_max_occupancy==1U);
     run_arq(&s);assert(s.state==NR_ARQ_COMPLETE&&s.stats.delivered==5U);
     assert(s.history_count>1U&&s.history[s.history_count-1U].queue_utilization>=0.0);
+    nr_arq_free(&s);
 }
 int main(void) {
     test_graph_and_routing(); test_packets_and_recovery(); test_cidr(); test_persistence();

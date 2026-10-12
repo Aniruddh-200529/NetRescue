@@ -1,89 +1,134 @@
-# NetRescue
+# NetRescue — Network Reliability and Simulation Lab
 
-NetRescue is a native C11 network reliability lab with a Windows NOC-style desktop dashboard and portable CLI. A shared graph and simulation engine drives Dijkstra routing, packet progression, topology generation, reliability protocols, error recovery, statistics, and the dashboard visualization. The supplied image was used as visual direction for a dark, high-contrast network operations layout; the interface and topology are original.
+NetRescue is a network simulation lab whose **entire simulation core is written in C** (C11) and whose
+user interface is a **React + TypeScript website**. The C engine is compiled to **WebAssembly** with
+Emscripten and runs inside a Web Worker in the browser; the website only draws what the engine returns.
+
+| Layer | Language | What it does |
+|---|---|---|
+| Simulation engine (`src/`, `include/`) | **C11** | Graph, topology generators, Dijkstra routing, hop-by-hop discrete-event packet simulation, bounded queues, link delay/bandwidth/jitter, Stop-and-Wait / Go-Back-N / Selective Repeat, checksums, fault injection, congestion control, metrics, experiment runner with statistics, presets, save/load, CSV export, JSON API |
+| Bridge | C → WebAssembly | `nr_api_call(json)` is the only function the website calls |
+| Website (`web/`) | React, TypeScript, Vite, React Flow, Recharts | Topology editor, controls, animation, charts, tables, exports |
+
+![Network Simulation mode](docs/screenshots/lab.png)
 
 ## Features
 
-- Bounded graph model with hosts, routers, switches, servers, wireless APs, directed/bidirectional links, queues, link delay/bandwidth/loss, and Dijkstra routing by cost, delay, or weighted composite cost.
-- Line, bus, star, ring, tree, full mesh, hybrid, and seeded random topology templates. Drag nodes, add/delete nodes, add/delete links, fail/recover links and nodes, and select transfer endpoints.
-- Stop-and-Wait, Go-Back-N, and Selective Repeat ARQ with sliding windows, sequence numbers, checksum corruption detection, ACK/NACK, loss, timeouts, retransmission, receiver buffering, duplicate/out-of-order handling, and bounded retry failure.
-- Finite rate traffic batches, pause/resume/stop, configurable packet count/rate/window/timeout/data and ACK loss/corruption, fixed or regenerated seed, and fair-seed GBN/SR comparison.
-- Bounded forwarding queues on the selected route. Queue overflow is a real data drop and triggers ARQ recovery. Optional educational congestion control halves the offered rate on congestion and gradually increases it as the queue clears.
-- Live topology and packet/ACK animation, event log, delivery/throughput/latency/queue/loss charts, transmission/retry/loss statistics, and protocol efficiency metrics.
-- Existing hop-by-hop packet simulator with link/node fault recovery, queue overflow drops, congestion/utilization, checksum utility, project-defined reliability score, CIDR `/0` through `/32`, and versioned topology save/load.
-- Native Win32/GDI dashboard in C. No JavaScript, web stack, Python runtime, or external GUI library is used by the application.
+**Mode A — Network Simulation lab**
+- Generate line, bus, star, ring, tree, full-mesh, hybrid and seeded-random topologies; add/delete/move hosts, routers, switches, servers and access points; connect nodes; edit bandwidth, delay, jitter, per-link loss, routing cost, direction and queue capacity; fail/recover nodes and links (also mid-transfer); save/load `.topo` files; validation of disconnected networks and unreachable endpoints.
+- Configure protocol, packet count, payload, window, timeout, retry limit, offered rate, seed, the four impairment probabilities, NAK, corruption burst size, congestion control, cross traffic and a time limit.
+- Deterministic fault rules: drop/corrupt DATA seq *N* on attempt *A*, drop/corrupt the *A*-th ACK for seq *N*, burst loss, temporary link outage, forced queue overflow.
+- Start / Pause / Resume / Stop / Reset, speed control (0.01×–5× real time) and **single-event stepping**.
+- Live animation of DATA, retransmissions, ACK/NAK, corrupted frames and losses on the actual Dijkstra route; queue occupancy at routers; sender/receiver sliding windows; event log; fault ledger (time, frame, node/link, fault type, detected?, protocol response, recovered?); live charts; metrics; trace export (CSV + JSON).
 
-The reliability score in the graph simulator is project-defined (delivery ratio with a loss/drop penalty), not an industry-standard metric. The ARQ dashboard's displayed reliability is the measured delivery ratio for the selected transfer.
+**Mode B — Protocol Comparison laboratory** (separate page)
+- Fair runner in C: same topology, endpoints, packets, payload, links, queues, fault model and seed schedule for every protocol; all state is rebuilt for every run.
+- Single-run comparison or repeated trials with mean, sample standard deviation and Student-t 95 % confidence intervals; sweeps over loss, corruption, ACK loss/corruption, timeout, window, rate, queue size, delay, bandwidth, jitter, congestion mode or payload.
+- Seven one-click prebuilt experiments (ideal network, increasing loss, corruption, ACK loss, Go-Back-N vs Selective Repeat, congestion, timeout sensitivity).
+- Results table, bar/line charts with error bars, fault & recovery and queue/congestion tables, retransmission evidence (exact sequence numbers), per-trial table, captured event traces, findings generated by the C engine from the measurements, CSV / JSON / HTML-report export, and an experiment history.
 
-## Build and run
+![Protocol Comparison mode](docs/screenshots/compare-gbn-vs-sr.png)
 
-Requires CMake 3.16+ and a C11 compiler. No external libraries are needed for the simulator; the Windows UI uses system Win32 libraries.
+## Quick start on Windows (just run the website)
 
-### Windows
+The repository already contains the compiled WebAssembly engine (`web/src/engine/generated/`), so only Node.js is needed.
 
-With MSVC Build Tools:
+1. Install **Node.js 20 or newer (LTS)** from <https://nodejs.org>.
+2. Open a Command Prompt in the project folder and run:
+   ```bat
+   start-website.bat
+   ```
+   or manually:
+   ```bat
+   cd web
+   npm install
+   npm run dev
+   ```
+3. Open <http://localhost:5173>. The badge in the top-right corner shows `C engine · webassembly · API v1` when the engine has loaded.
 
-```powershell
-cmake -S . -B build
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
-.\build\Release\NetRescue.exe
+For a production build: `cd web`, `npm run build`, `npm run preview` (serves `web/dist` at <http://localhost:4173>). Browsers do not allow WebAssembly workers from `file://`, so always open the site through one of these servers.
+
+## Building the C engine natively (Windows)
+
+Needed for the C tests, the CLI tools, the original Win32 dashboard, and to cross-check the WebAssembly build.
+
+**Tools:** CMake 3.16+ and either Visual Studio Build Tools (MSVC) or MinGW-w64 gcc (e.g. `winget install BrechtSanders.WinLibs.POSIX.UCRT`).
+
+```bat
+build.bat
 ```
-
-This workspace also has a portable local toolchain (CMake 4.4.4, Ninja 1.13.2, Zig 0.16.0):
-
-```powershell
-$root = (Get-Location).Path
-& .netrescue-tools\cmake\data\bin\cmake.exe -S $root -B "$root\build" -G Ninja `
-  -DCMAKE_MAKE_PROGRAM="$root\.netrescue-tools\bin\ninja.exe" `
-  -DCMAKE_C_COMPILER="$root\.netrescue-tools\ziglang\zig.exe" `
-  -DCMAKE_C_COMPILER_ARG1=cc -DCMAKE_BUILD_TYPE=Release
-& .netrescue-tools\cmake\data\bin\cmake.exe --build "$root\build" --parallel 4
-& .netrescue-tools\cmake\data\bin\ctest.exe --test-dir "$root\build" --output-on-failure
-& "$root\build\NetRescue.exe"
-```
-
-### Linux
-
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+`build.bat` picks MSVC when `cl` is on PATH (Developer Command Prompt), otherwise MinGW, then builds and runs all C tests. Equivalent manual commands with MinGW:
+```bat
+cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
-./build/NetRescue
 ```
+With MSVC: `cmake -S . -B build` then `cmake --build build --config Release` and `ctest --test-dir build -C Release --output-on-failure`.
 
-On non-Windows platforms, `NetRescue` is the portable CLI demonstration. `build.bat` and `build.sh` are convenience scripts.
+Executables in `build\` (or `build\Release\` with MSVC):
 
-## Dashboard controls
-
-- **Start / Pause / Resume** runs or pauses the configured ARQ transfer. **Run Traffic** starts a batch; while active it becomes **Stop Traffic**. `S` sends a batch and `Space` pauses/resumes.
-- Select nodes, then press `1` to set the source or `2` to set the destination. The initial endpoints are the first and last nodes. Drag to reposition.
-- Click a link then **Fail Link** or press `F` to fail/recover it. Select a node and press `N` to fail/recover it. `R` resets transfer metrics and restores failed elements; `F5` restores the demo network.
-- Select a node and press `F2` to rename it or `T` to cycle its device type. Select a link to edit bandwidth, delay, loss, and cost by clicking the corresponding inspector row; `K` toggles directed/bidirectional mode. These edits are disabled during a live transfer.
-- The left sidebar creates a node attached to the selected node. Press `L` with a selected node, then select a second node to add a link. `Delete` removes the selected link or node when no transfer is active.
-- Click a topology name to generate an eight-node connected graph. Topology generation is disabled while a transfer is running or paused.
-- Click protocol to cycle through Stop-and-Wait, GBN, and SR. Click the inspector rows to adjust window, loss, ACK loss, packet count, corruption, ACK corruption, timeout, and payload size (left side reduces; right side increases). `+/-` adjusts rate; `G` generates a seed. `[` and `]` also adjust payload size.
-- Press `M` to toggle the educational congestion controller. A full forwarding queue drops that transmission, causing its normal timeout/NACK/retry recovery; the controller halves traffic rate, then increases it additively while the queue drains.
-- Click the graph to cycle delivery ratio, throughput, latency, queue utilization, and packet loss. Press `V` to compare GBN and SR under the configured conditions and seed.
-- `Ctrl+S` saves a topology; `Ctrl+O` loads one. `Esc` clears selection. `F` acts on the selected link; if none is selected it selects the first link.
-
-The canvas depicts actual graph routes and in-flight ARQ data/ACK events. The event log and chart are sourced from simulation state, not generated presentation data.
-
-## Modules and lab mapping
-
-| Lab topic | Module |
+| Program | Purpose |
 |---|---|
-| Graph/topology construction and templates | `network.c`, `topology.c` |
-| Shortest-path routing and alternate routes | Dijkstra in `network.c` |
-| Packet transmission and fault recovery | `network.c`, `arq.c` |
-| Stop-and-Wait, GBN, Selective Repeat | `arq.c` |
-| Checksum / CIDR analysis | `network.c`, `cidr.c` |
-| Queue overflow and congestion indicators | `network.c` |
-| Metrics and experiment history | `arq.c`, Win32 dashboard |
-| Save/load | `persistence.c` |
+| `NetRescue.exe` | Original Win32/GDI desktop dashboard (kept, ported to the new engine) |
+| `NetRescueCLI.exe` | Routing demo; `--list-presets`; `--preset gbn_vs_sr` runs a prebuilt experiment and prints the table and findings |
+| `netrescue_api.exe` | Native host of the website's JSON API: one JSON request per line on stdin → one response per line (C-backend fallback and scripting tool) |
+| `test_core.exe`, `test_engine.exe`, `test_api.exe` | C test suites |
 
-Read [architecture](docs/architecture.md), [algorithms](docs/algorithms.md), [user manual](docs/user_manual.md), and [testing](docs/testing.md) for details.
+Example: `echo {"cmd":"run_preset","id":"gbn_vs_sr"} | build\netrescue_api.exe`
+
+## Rebuilding the WebAssembly engine (only after changing C code)
+
+1. Install the Emscripten SDK once:
+   ```bat
+   git clone https://github.com/emscripten-core/emsdk.git %USERPROFILE%\emsdk
+   cd %USERPROFILE%\emsdk
+   emsdk install latest
+   emsdk activate latest
+   ```
+2. From the project folder:
+   ```bat
+   powershell -ExecutionPolicy Bypass -File scripts\build-wasm.ps1
+   ```
+   (pass `-Emsdk C:\path\to\emsdk` if it is elsewhere). This compiles the same 11 C modules into `web\src\engine\generated\netrescue_engine.mjs` + `.wasm`. Alternatively: `emcmake cmake -S . -B build-wasm && cmake --build build-wasm`.
+
+This project was built and verified with Emscripten 6.0.12.
+
+## Using the website
+
+**Configure a topology:** pick a template, node count and seed and press *Generate*, or *Demo network*. Add devices, select a node and press *Connect selected node…* then click the peer. Click a node or link to edit it in the Inspector; drag nodes to move them. Choose source and destination under *Transfer endpoints*; the engine shows the Dijkstra route, the ACK route and the no-load RTT. *Validation* lists errors (e.g. unreachable destination) that block a start.
+
+**Introduce errors:** in *Fault injection* set data loss, data corruption, ACK loss and ACK corruption probabilities, and add deterministic rules (e.g. “Drop DATA packet, sequence 3, attempt 1”). In the Inspector set a per-link loss probability or press *Fail link* during a transfer. In *Queues & congestion* lower queue sizes, add cross traffic, or pick a congestion controller.
+
+**Run the protocols:** choose Stop-and-Wait, Go-Back-N or Selective Repeat in *Protocol & traffic* and press *Start*. Use the speed slider (0.05× is good for watching), *Pause* and *Step*. Watch the *Event log*, *Fault ledger*, *Sender / receiver windows*, *Live charts* and *Metrics* tabs. *Export trace* downloads the engine's event trace (CSV) and run summary (JSON).
+
+**Comparison mode:** open *Protocol Comparison*. Press *Run* on a prebuilt experiment, or *Load into form* to adapt it, or fill in the form (topology, protocols, settings, fault model, trials, seed base/stride, sweep) and press *Run comparison*.
+
+**Export results:** in the results header use *Export CSV* (one row per engine run, written by C), *Export JSON* (the complete engine result) or *Download report* (standalone HTML). Every run is also kept under *Experiment History*, which can re-open, export or import results.
+
+## Tests
+
+| Suite | Command | What it covers |
+|---|---|---|
+| C: `core` | `ctest --test-dir build` | the original regression tests (graph, routing, packets, CIDR, persistence, topologies, ARQ basics, congestion) |
+| C: `engine` | ″ | all protocols, window limits, GBN-vs-SR middle loss, corruption + NAK/timeout recovery, ACK loss/corruption, duplicates, retry and time limits, burst loss, link outage, queue overflow, congestion control, random faults, metric formulas checked against the event trace, reproducibility, run isolation, statistics, presets, CSV, validation, save/load |
+| C: `api` | ″ | JSON parser/writer and every API command as the website calls it |
+| Web: unit + integration | `cd web` then `npm test` | the WebAssembly engine in Node (protocol evidence, reproducibility, CSV), **byte-identical results between WebAssembly and native builds**, UI controls driving the real engine, results rendering |
+| Web: end-to-end | `cd web`, `npm run build`, `npm run e2e` | headless Edge/Chrome drives the built site: live transfer, deterministic loss, presets, exports, history; screenshots in `web/e2e-output/` |
+
+## Documentation
+
+- [docs/teacher-demo.md](docs/teacher-demo.md) — step-by-step demonstration script
+- [docs/viva-guide.md](docs/viva-guide.md) — viva questions and answers
+- [docs/metrics.md](docs/metrics.md) — every metric with its formula
+- [docs/fault-injection.md](docs/fault-injection.md) — how errors are introduced and recorded
+- [docs/architecture.md](docs/architecture.md), [docs/algorithms.md](docs/algorithms.md), [docs/api.md](docs/api.md)
+- [docs/testing.md](docs/testing.md) — test inventory and verification results
+- [docs/CHANGES.md](docs/CHANGES.md) — modified files and architecture decisions
 
 ## Limitations
 
-The core uses fixed maximum capacities for predictable memory use. Congestion control is an educational additive-increase/multiplicative-decrease model over the route's bounded forwarding queue, not a full TCP congestion-control implementation. The current native UI is Windows-only; Linux and macOS builds run the CLI. CIDR is exposed as a C API rather than an interactive dashboard tool. Real TCP/UDP sockets and DNS are optional extensions and are not part of this simulator build.
+- One reliable transfer is simulated at a time (plus optional constant-rate cross traffic on the first forwarding hop). Sequence numbers are not wrapped modulo 2^k.
+- The data-frame header is modelled as protected by the link layer, so corruption hits the payload and the receiver can NAK the correct sequence number.
+- Congestion control is educational AIMD (rate-based on explicit queue-overflow signals, or window-based on timeouts), not TCP.
+- The bus topology is modelled as a chain of point-to-point links, not a shared medium.
+- The engine has fixed capacities: 64 nodes, 256 links, 1024 packets per transfer, 256-frame queues, 4000 runs per experiment.

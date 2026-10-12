@@ -7,6 +7,41 @@ static unsigned next_random(unsigned *state) {
     return *state;
 }
 
+/* Device roles: transfer endpoints are hosts; forwarding devices are routers or switches. */
+static NrNodeType node_role(NrTopologyType type, size_t i, size_t count) {
+    switch (type) {
+    case NR_TOPO_STAR: return i == count / 2U ? NR_SWITCH : NR_HOST;
+    case NR_TOPO_RING: return i == 0U || i == count / 2U ? NR_HOST : NR_ROUTER;
+    case NR_TOPO_TREE:
+        if (i == 0U) return count == 1U ? NR_HOST : NR_ROUTER;
+        return 2U * i + 1U >= count ? NR_HOST : NR_SWITCH;
+    default: return i == 0U || i + 1U == count ? NR_HOST : NR_ROUTER;
+    }
+}
+
+static void node_position(NrTopologyType type, size_t i, size_t count, float *x, float *y) {
+    if (type == NR_TOPO_LINE || type == NR_TOPO_BUS) {
+        *x = 0.08F + 0.84F * (float)i / (float)(count - 1U); *y = 0.5F + (i % 2U == 0U ? -0.04F : 0.04F);
+        return;
+    }
+    if (type == NR_TOPO_TREE) {
+        size_t level = 0U, first = 0U, width = 1U;
+        while (i >= first + width) { first += width; width *= 2U; ++level; }
+        size_t levels = 0U, f = 0U, w = 1U;
+        while (f < count) { f += w; w *= 2U; ++levels; }
+        *x = (float)(0.06 + 0.88 * ((double)(i - first) + 0.5) / (double)width);
+        *y = (float)(levels <= 1U ? 0.5 : 0.1 + 0.8 * (double)level / (double)(levels - 1U));
+        return;
+    }
+    size_t slot = i, slots = count;
+    if (type == NR_TOPO_STAR) {
+        if (i == count / 2U) { *x = 0.5F; *y = 0.5F; return; }
+        slot = i < count / 2U ? i : i - 1U; slots = count - 1U;
+    }
+    const double angle = -1.5707963267948966 + 6.283185307179586 * (double)slot / (double)slots;
+    *x = (float)(0.5 + 0.4 * cos(angle)); *y = (float)(0.5 + 0.4 * sin(angle));
+}
+
 const char *nr_topology_name(NrTopologyType type) {
     static const char *names[] = {"Line", "Bus", "Star", "Ring", "Tree", "Mesh", "Hybrid", "Random"};
     return type >= NR_TOPO_LINE && type < NR_TOPO_COUNT ? names[type] : "Unknown";
@@ -20,14 +55,10 @@ bool nr_generate_topology(NrNetwork *network, NrTopologyType type, size_t count,
     int ids[NR_MAX_NODES];
     for (size_t i = 0; i < count; ++i) {
         float x, y;
-        if (type == NR_TOPO_LINE || type == NR_TOPO_BUS) {
-            x = 0.08F + 0.84F * (float)i / (float)(count - 1U); y = 0.5F + (i % 2U == 0U ? -0.04F : 0.04F);
-        } else {
-            const double angle = -1.5707963267948966 + 6.283185307179586 * (double)i / (double)count;
-            x = (float)(0.5 + 0.37 * cos(angle)); y = (float)(0.5 + 0.37 * sin(angle));
-        }
-        const NrNodeType node_type = i == 0U || i + 1U == count ? NR_HOST : NR_ROUTER;
-        char name[NR_NAME_LEN]; (void)snprintf(name, sizeof(name), "%s%zu", node_type == NR_HOST ? "H" : "R", i + 1U);
+        node_position(type, i, count, &x, &y);
+        const NrNodeType node_type = node_role(type, i, count);
+        static const char *prefix[] = {"H", "R", "S", "SV", "AP"};
+        char name[NR_NAME_LEN]; (void)snprintf(name, sizeof(name), "%s%zu", prefix[node_type], i + 1U);
         ids[i] = nr_add_node(network, name, node_type, x, y);
         if (ids[i] < 0) return false;
     }
